@@ -1,220 +1,239 @@
-﻿#define GLEW_STATIC
-#include <GL/glew.h>
-#include <GLFW/glfw3.h>
-#include <glm/glm.hpp>
-#include <vector>
-#include <iostream>
+enum eVertexArrayObject {
+    VAOVerticesData,
+    VAOCount
+};
+enum eBufferObject {
+    VBOVerticesData,
+    BOCount
+};
+enum eProgram {
+    QuadScreenProgram,
+    ProgramCount
+};
+enum eTexture {
+    NoTexture,
+    TextureCount
+};
 
-using namespace std;
-using namespace glm;
+#include <common.cpp>
 
-// Ablak
-int windowWidth = 800;
-int windowHeight = 800;
-float aspectRatio = 1.0f;
+GLchar windowTitle[] = "Drag-and-Drop";
+GLfloat aspectRatio;
+GLint dragged = -1;
+GLfloat pointSize = 10.0f; 
 
-// Kontrollpontok
-vector<vec2> points;
-int dragged = -1;
 
-// Shader
-GLuint program;
-GLuint VBO, VAO;
+static vector<vec2> verticesData = {
+    vec2(-0.5f, -0.5f),
+    vec2(-0.5f,  0.5f),
+    vec2(0.5f,  0.5f),
+    vec2(0.5f, -0.5f)
+};
 
-// ===== SHADEREK =====
-const char* vertexShaderSource = R"(
-#version 330 core
-layout (location = 0) in vec2 aPos;
-void main() {
-    gl_Position = vec4(aPos, 0.0, 1.0);
-}
-)";
+void initShaderProgram() {
+    ShaderInfo shader_info[ProgramCount][3] = { {
+        { GL_VERTEX_SHADER, "./vertexShader.glsl" },
+        { GL_FRAGMENT_SHADER, "./fragmentShader.glsl" },
+        { GL_NONE, nullptr } } };
 
-const char* fragmentShaderSource = R"(
-#version 330 core
-uniform vec3 color;
-out vec4 FragColor;
-void main() {
-    FragColor = vec4(color, 1.0);
-}
-)";
+    for (int programItem = 0; programItem < ProgramCount; programItem++) {
+        program[programItem] = LoadShaders(shader_info[programItem]);
+        locationMatModel = glGetUniformLocation(program[programItem], "matModel");
+        locationMatView = glGetUniformLocation(program[programItem], "matView");
+        locationMatProjection = glGetUniformLocation(program[programItem], "matProjection");
+    }
 
-// ===== SEGÉDFÜGGVÉNYEK =====
+    glBindVertexArray(VAO[VAOVerticesData]);
+    glBindBuffer(GL_ARRAY_BUFFER, BO[VBOVerticesData]);
+    glBufferData(GL_ARRAY_BUFFER, verticesData.size() * sizeof(vec2), verticesData.data(), GL_DYNAMIC_DRAW);
 
-float dist2(vec2 a, vec2 b) {
-    vec2 d = a - b;
-    return dot(d, d);
-}
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, sizeof(vec2), 0);
 
-// De Casteljau
-vec2 bezier(float t, vector<vec2> p) {
-    int n = p.size();
-    for (int k = 1; k < n; k++)
-        for (int i = 0; i < n - k; i++)
-            p[i] = (1 - t) * p[i] + t * p[i + 1];
-    return p[0];
-}
+    glUseProgram(program[QuadScreenProgram]);
 
-// ===== INPUT =====
+    matModel = mat4(1.0);
+    matView = lookAt(vec3(0.0f, 0.0f, 9.0f),
+        vec3(0.0f, 0.0f, 0.0f),
+        vec3(0.0f, 1.0f, 0.0f));
 
-vec2 screenToWorld(double x, double y) {
-    vec2 p;
-    p.x = (x / windowWidth) * 2.0f - 1.0f;
-    p.y = 1.0f - (y / windowHeight) * 2.0f;
-
-    if (windowWidth < windowHeight)
-        p.y /= aspectRatio;
-    else
-        p.x *= aspectRatio;
-
-    return p;
+    glUniformMatrix4fv(locationMatModel, 1, GL_FALSE, value_ptr(matModel));
+    glUniformMatrix4fv(locationMatView, 1, GL_FALSE, value_ptr(matView));
+    glUniformMatrix4fv(locationMatProjection, 1, GL_FALSE, value_ptr(matProjection));
 }
 
-int getPoint(vec2 m) {
-    for (int i = 0; i < points.size(); i++)
-        if (dist2(points[i], m) < 0.02f)
+GLfloat distanceSquare(vec2 p1, vec2 p2) {
+    vec2 delta = p1 - p2;
+    return dot(delta, delta);
+}
+
+
+vec2 bezierPoint(float t, const vector<vec2>& points) {
+    vector<vec2> temp = points;
+    int n = temp.size();
+    for (int k = 1; k < n; k++) {
+        for (int i = 0; i < n - k; i++) {
+            temp[i] = (1.0f - t) * temp[i] + t * temp[i + 1];
+        }
+    }
+    return temp[0];
+}
+
+// Billentyű eseménykezelés
+void keyCallback(GLFWwindow* window, int key, int scancode, int action, int mods) {
+    /** ESC billentyûre kilépés. */
+    if ((action == GLFW_PRESS) && (key == GLFW_KEY_ESCAPE))
+        glfwSetWindowShouldClose(window, GLFW_TRUE);
+}
+
+// Aktív pont kiválasztása az egér pozíció alapján
+GLint getActivePoint(vector<vec2> p, GLfloat sensitivity, vec2 mousePosition) {
+    GLfloat sensitivitySquare = sensitivity * sensitivity;
+    for (GLint i = 0; i < p.size(); i++)
+        if (distanceSquare(p[i], mousePosition) < sensitivitySquare)
             return i;
     return -1;
 }
 
-void mouseButton(GLFWwindow* window, int button, int action, int mods) {
-    double x, y;
-    glfwGetCursorPos(window, &x, &y);
-    vec2 m = screenToWorld(x, y);
-
-    if (button == GLFW_MOUSE_BUTTON_LEFT && action == GLFW_PRESS) {
-        dragged = getPoint(m);
-        if (dragged == -1) {
-            points.push_back(m);
-            dragged = points.size() - 1;
-        }
-    }
-
-    if (button == GLFW_MOUSE_BUTTON_LEFT && action == GLFW_RELEASE)
-        dragged = -1;
-
-    if (button == GLFW_MOUSE_BUTTON_RIGHT && action == GLFW_PRESS) {
-        int idx = getPoint(m);
-        if (idx >= 0)
-            points.erase(points.begin() + idx);
-    }
-}
-
-void cursorPos(GLFWwindow* window, double x, double y) {
-    if (dragged >= 0) {
-        points[dragged] = screenToWorld(x, y);
-    }
-}
-
-// ===== RAJZOLÁS =====
-
-void draw(vector<vec2>& data, GLenum mode, vec3 color) {
-    glUniform3f(glGetUniformLocation(program, "color"), color.r, color.g, color.b);
-
-    glBindBuffer(GL_ARRAY_BUFFER, VBO);
-    glBufferData(GL_ARRAY_BUFFER, data.size() * sizeof(vec2), data.data(), GL_DYNAMIC_DRAW);
-
-    glDrawArrays(mode, 0, data.size());
-}
-
-void display() {
+// Kirajzolás
+void display(GLFWwindow* window, double currentTime) {
     glClear(GL_COLOR_BUFFER_BIT);
 
-    // Kontrollpontok
-    glPointSize(7.0f); // ✔ megfelel
-    draw(points, GL_POINTS, vec3(0.2f, 1.0f, 0.2f));
+    // Állítsuk be a programot
+    glUseProgram(program[QuadScreenProgram]);
+    glBindVertexArray(VAO[VAOVerticesData]);
+    glBindBuffer(GL_ARRAY_BUFFER, BO[VBOVerticesData]);
 
-    // Kontrollpoligon
-    draw(points, GL_LINE_STRIP, vec3(0.7f, 0.7f, 0.7f));
+    // Kontrollpontok kirajzolása
+    glPointSize(7.0f); // pontok mérete 10 pixel
+    glUniform3f(glGetUniformLocation(program[QuadScreenProgram], "uColor"), 0.85f, 0.2f, 0.5f); // ciklámen
+    glBufferData(GL_ARRAY_BUFFER, verticesData.size() * sizeof(vec2), verticesData.data(), GL_DYNAMIC_DRAW);
+    glDrawArrays(GL_POINTS, 0, verticesData.size());
 
-    // Bézier görbe
-    if (points.size() >= 2) {
-        vector<vec2> curve;
+    // Kontrollpoligon kirajzolása (nem záródik vissza)
+    glUniform3f(glGetUniformLocation(program[QuadScreenProgram], "uColor"), 1.0f, 0.7f, 0.8f); // rózsaszín
+    glDrawArrays(GL_LINE_STRIP, 0, verticesData.size());
 
-        int resolution = 300; // ✔ simább
-        for (int i = 0; i <= resolution; i++) {
-            float t = (float)i / resolution;
-            curve.push_back(bezier(t, points));
+    // Bézier-görbe számítása
+    vector<vec2> curvePoints;
+    for (float t = 0.0f; t <= 1.0f; t += 0.01f)
+        curvePoints.push_back(bezierPoint(t, verticesData));
+
+    // Bézier-görbe kirajzolása
+    glUniform3f(glGetUniformLocation(program[QuadScreenProgram], "uColor"), 0.6f, 0.8f, 1.0f); // kék
+    glBufferData(GL_ARRAY_BUFFER, curvePoints.size() * sizeof(vec2), curvePoints.data(), GL_DYNAMIC_DRAW);
+    glDrawArrays(GL_LINE_STRIP, 0, curvePoints.size());
+
+    // Kontrollpontok visszaállítása a bufferbe a további drag-and-drophoz
+    glBufferData(GL_ARRAY_BUFFER, verticesData.size() * sizeof(vec2), verticesData.data(), GL_DYNAMIC_DRAW);
+}
+
+// Ablakméret változás kezelése
+void framebufferSizeCallback(GLFWwindow* window, int width, int height) {
+    windowWidth = glm::max(width, 1);
+    windowHeight = glm::max(height, 1);
+
+    aspectRatio = (float)windowWidth / (float)windowHeight;
+    glViewport(0, 0, windowWidth, windowHeight);
+
+    if (projectionType == Orthographic)
+        if (windowWidth < windowHeight)
+            matProjection = ortho(-worldSize, worldSize, -worldSize / aspectRatio, worldSize / aspectRatio, -100.0, 100.0);
+        else
+            matProjection = ortho(-worldSize * aspectRatio, worldSize * aspectRatio, -worldSize, worldSize, -100.0, 100.0);
+    else
+        matProjection = perspective(radians(45.0f), aspectRatio, 0.1f, 100.0f);
+
+    glUniformMatrix4fv(locationMatProjection, 1, GL_FALSE, value_ptr(matProjection));
+}
+
+// Egér mozgatás
+void cursorPosCallback(GLFWwindow* window, double xPos, double yPos) {
+    if (dragged >= 0) {
+        dvec2 mousePosition;
+        mousePosition.x = xPos * 2.0 / (GLdouble)windowWidth - 1.0;
+        mousePosition.y = ((GLdouble)windowHeight - yPos) * 2.0 / (GLdouble)windowHeight - 1.0;
+
+        if (windowWidth < windowHeight)
+            mousePosition.y /= aspectRatio;
+        else
+            mousePosition.x *= aspectRatio;
+
+        // Pont mozgatása
+        verticesData[dragged] = mousePosition;
+
+        glBindBuffer(GL_ARRAY_BUFFER, BO[VBOVerticesData]);
+        glBufferData(GL_ARRAY_BUFFER, verticesData.size() * sizeof(vec2), verticesData.data(), GL_DYNAMIC_DRAW);
+    }
+}
+
+// Egérgomb események
+void mouseButtonCallback(GLFWwindow* window, int button, int action, int mods) {
+    dvec2 mousePosition;
+
+    // Egér pozíció lekérdezése
+    glfwGetCursorPos(window, &mousePosition.x, &mousePosition.y);
+    mousePosition.x = mousePosition.x * 2.0 / (GLdouble)windowWidth - 1.0;
+    mousePosition.y = ((GLdouble)windowHeight - mousePosition.y) * 2.0 / (GLdouble)windowHeight - 1.0;
+
+    // Aspect ratio korrekció
+    if (windowWidth < windowHeight)
+        mousePosition.y /= aspectRatio;
+    else
+        mousePosition.x *= aspectRatio;
+
+    if (button == GLFW_MOUSE_BUTTON_LEFT && action == GLFW_PRESS) {
+        // Megnézzük, hogy van-e már pont közel a kattintáshoz
+        dragged = getActivePoint(verticesData, 0.1f, mousePosition);
+
+        if (dragged == -1) {
+            // Üres helyre kattintás -> új kontrollpont hozzáadása
+            verticesData.push_back(mousePosition);
+            dragged = verticesData.size() - 1; // rögtön mozgatható lesz
+
+            // GPU buffer frissítése
+            glBindBuffer(GL_ARRAY_BUFFER, BO[VBOVerticesData]);
+            glBufferData(GL_ARRAY_BUFFER, verticesData.size() * sizeof(vec2), verticesData.data(), GL_DYNAMIC_DRAW);
         }
+    }
 
-        glLineWidth(3.0f);
-        draw(curve, GL_LINE_STRIP, vec3(1.0f, 0.2f, 0.2f));
+    if (button == GLFW_MOUSE_BUTTON_LEFT && action == GLFW_RELEASE) {
+        // Drag-and-drop leállítása
+        dragged = -1;
+    }
+
+    if (button == GLFW_MOUSE_BUTTON_RIGHT && action == GLFW_PRESS) {
+        // Jobb gomb -> meglévő pont törlése
+        GLint index = getActivePoint(verticesData, 0.1f, mousePosition);
+
+        if (index >= 0 && verticesData.size() > 1) {
+            verticesData.erase(verticesData.begin() + index);
+
+            // GPU buffer frissítése
+            glBindBuffer(GL_ARRAY_BUFFER, BO[VBOVerticesData]);
+            glBufferData(GL_ARRAY_BUFFER, verticesData.size() * sizeof(vec2), verticesData.data(), GL_DYNAMIC_DRAW);
+        }
     }
 }
 
-// ===== INIT =====
+// Főprogram
+int main(void) {
+    init(3, 3, GLFW_OPENGL_COMPAT_PROFILE);
+    initShaderProgram();
+    framebufferSizeCallback(window, windowWidth, windowHeight);
 
-GLuint compileShader(GLenum type, const char* src) {
-    GLuint s = glCreateShader(type);
-    glShaderSource(s, 1, &src, NULL);
-    glCompileShader(s);
-
-    int success;
-    glGetShaderiv(s, GL_COMPILE_STATUS, &success);
-    if (!success) {
-        char log[512];
-        glGetShaderInfoLog(s, 512, NULL, log);
-        cout << log << endl;
-    }
-    return s;
-}
-
-void init() {
-    glewInit();
-
-    GLuint vs = compileShader(GL_VERTEX_SHADER, vertexShaderSource);
-    GLuint fs = compileShader(GL_FRAGMENT_SHADER, fragmentShaderSource);
-
-    program = glCreateProgram();
-    glAttachShader(program, vs);
-    glAttachShader(program, fs);
-    glLinkProgram(program);
-
-    glUseProgram(program);
-
-    glGenVertexArrays(1, &VAO);
-    glGenBuffers(1, &VBO);
-
-    glBindVertexArray(VAO);
-    glBindBuffer(GL_ARRAY_BUFFER, VBO);
-
-    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, sizeof(vec2), 0);
-    glEnableVertexAttribArray(0);
-
-    glEnable(GL_POINT_SMOOTH);
-    glEnable(GL_LINE_SMOOTH);
-
-    glClearColor(0.1f, 0.1f, 0.1f, 1.0f); // ✔ szebb háttér
-}
-
-// ===== MAIN =====
-
-int main() {
-    glfwInit();
-
-    GLFWwindow* window = glfwCreateWindow(windowWidth, windowHeight, "Bezier", NULL, NULL);
-    glfwMakeContextCurrent(window);
-
-    init();
-
-    glfwSetMouseButtonCallback(window, mouseButton);
-    glfwSetCursorPosCallback(window, cursorPos);
+    // Callback-ok beállítása
+    glfwSetKeyCallback(window, keyCallback);
+    glfwSetCursorPosCallback(window, cursorPosCallback);
+    glfwSetMouseButtonCallback(window, mouseButtonCallback);
 
     while (!glfwWindowShouldClose(window)) {
-        int w, h;
-        glfwGetFramebufferSize(window, &w, &h);
-        windowWidth = w;
-        windowHeight = h;
-        aspectRatio = (float)w / h;
-
-        glViewport(0, 0, w, h);
-
-        display();
-
+        display(window, glfwGetTime());
         glfwSwapBuffers(window);
         glfwPollEvents();
     }
 
-    glfwTerminate();
-    return 0;
+    cleanUpScene(EXIT_SUCCESS);
+    return EXIT_SUCCESS;
 }
+//glClearColor(0.1f, 0.1f, 0.12f, 1.0f);
